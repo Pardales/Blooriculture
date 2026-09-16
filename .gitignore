@@ -1,0 +1,18 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Kaggle credentials / downloaded data — never commit these
+kaggle.json
+.kaggle/
+kaggriculture-data/
+replays/
+logs/
+*.tar.gz
+
+# OS / editor
+.DS_Store
+.vscode/
+.idea/
