@@ -444,6 +444,40 @@ Todas las cifras son **margen medio** (nuestro dinero − el del rival) contra
 | 09-27 | **`HIRE_BUDGET_SHARE` 0.16 → 0.28** | **200** | **+2 819** ± 1 866 | ✅ **ACEPTADO** |
 | 09-27 | `HIRE_BUDGET_SHARE` 0.40 | 200 | +2 700 ± 1 801 | Igual que 0.28 → `HIRE_BUDGET_CAP` ata |
 | 09-27 | Validación final v4 (0.28) | 120 | +4 166 (mediana −230) | ✅ media $59 056 vs $54 890 |
+| 09-27 | **v5: `invest_floor` realista** | **90** | **+4 744**, mediana +3 594, **62.2 %** ± 10.0 | ✅ **ACEPTADO** |
+| 09-27 | v5 confirmación, semillas nuevas | 202 | +3 542, mediana **+5 892**, **63.4 %** ± 6.6 | ✅ Confirmado (y subestimado, ver nota) |
+
+### 🎯 v5 — el bug de la reserva de caja (la mejor mejora hasta ahora)
+
+`invest_floor` reservaba **tres días del salario de `MAX_HANDS`**, o sea de las 13 manos
+que el presupuesto *podría* pagar como techo teórico:
+
+```
+invest_floor = 700 + 3.0 × cumulative_hire_cost(target_hands)   # target_hands = 13
+             = 700 + 3 × 609 = $2 527   ← ¡de un banco de $3 000!
+```
+
+Pero el bucle de contratación dimensiona la cuadrilla por el **trabajo disponible**, no
+por el techo. En el día 0 eso son 5 manos: coste real **$12**.
+
+> **Reservábamos $2 527 para pagar $12.** El 84 % del banco congelado.
+
+Eso dejaba **$473** invertibles: menos que una oveja ($500), apenas una vaca ($400). De
+ahí salían en cadena los tres síntomas que llevaba toda la sesión persiguiendo — sin
+animales hasta el día 12, sin tierra hasta el día 10, y el banco plano en ~$600 durante
+el primer tercio de la temporada.
+
+**El arreglo** calcula la cuadrilla que el trabajo realmente implica, con la misma
+expresión que usa el bucle de contratación, y reserva tres días de *eso*.
+
+**Efecto medido en la granja** (semilla 1003): vaca en el **día 3** en vez de corral vacío
+hasta el día 12; **$4.9k en el día 10** frente a $1.3k.
+
+> **Nota:** en la corrida de confirmación, 9 episodios dieron exactamente $3 000 (dinero
+> inicial) porque edité `main.py` mientras corría el test: los workers cargaron un fichero
+> a medio escribir. Esos ceros contaron como **derrotas**, así que el 63.4 % real es una
+> cota inferior. `bench.py` ahora hace una copia temporal del agente antes de empezar
+> (`snapshot()`), de modo que editar durante una medición ya no puede contaminarla.
 
 ### ⚠️ Ojo: el ranking premia VICTORIAS, no dinero
 

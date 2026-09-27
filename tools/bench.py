@@ -12,8 +12,10 @@ Agents are file paths, or one of the built-ins: pass, random, starter.
 import argparse
 import json
 import os
+import shutil
 import statistics
 import sys
+import tempfile
 import time
 import warnings
 from concurrent.futures import ProcessPoolExecutor
@@ -68,6 +70,24 @@ def resolve(a):
     return p
 
 
+def snapshot(a):
+    """Copy an agent to a temp file so edits mid-run cannot corrupt the result.
+
+    Workers import the agent file at episode start, so editing main.py while a
+    benchmark is in flight makes later episodes load a half-written file. The
+    agent then throws, scores exactly `startingMoney`, and the run silently
+    counts those as losses -- which is how a clean 220-episode run came back
+    with 18 errors and a $3,000 minimum.
+    """
+    if a in BUILTINS:
+        return a
+    fd, dest = tempfile.mkstemp(prefix="agent-", suffix=".py",
+                                dir=tempfile.gettempdir())
+    os.close(fd)
+    shutil.copyfile(a, dest)
+    return dest
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("agent_a")
@@ -81,8 +101,8 @@ def main():
     ap.add_argument("--label", default=None, help="label for the results file")
     args = ap.parse_args()
 
-    a = resolve(args.agent_a)
-    b = resolve(args.agent_a if args.self else args.agent_b)
+    a = snapshot(resolve(args.agent_a))
+    b = snapshot(resolve(args.agent_a if args.self else args.agent_b))
 
     jobs = []
     for i in range(args.seeds):

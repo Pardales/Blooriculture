@@ -133,6 +133,19 @@ MAX_HANDS = 13          # the fib hire cost eventually outruns what a hand reach
 HIRE_BUDGET_SHARE = 0.28  # of current cash, per day
 HIRE_BUDGET_CAP = 1700.0
 INVEST_FLOOR_SHARE = 0.90  # never reserve more than this fraction of the bank
+FLOOR_BASE = 700.0         # flat emergency cash held back
+# MEASURED: the single biggest win found so far. Swept 0 / .02 / .06 / .10 / .13
+# / .15 / .18 / .22 / .30 / .60 / 1.20 on two disjoint seed sets. Flat plateau at
+# .15-.18 (+$19k margin, 91-93% win rate, our mean $50k -> $70k), falling away on
+# both sides -- .10 is already negative and .60 is catastrophic. Taking the
+# midpoint of the plateau. What it changes: the opening plants wheat and carrot,
+# which pay on day 2, instead of strawberry, which pays nothing until day 10 --
+# the same shape the 165-199k agents on the leaderboard open with.
+CAPITAL_RATE = 0.165       # $/day charged per $ of seed money locked up
+CAPITAL_TIGHT = 1500.0     # investable cash below which capital gets pricier
+CAPITAL_SQUEEZE = 3.0      # how much dearer capital gets at zero cash
+WAGE_RESERVE_DAYS = 3.0    # days of the *realistic* wage bill kept in reserve
+WHEAT_RESERVE_PER_ANIMAL = 14.0  # feed money held back per head
 LABOR_PRICE = 11.0      # marginal $/action of the last hand we hire
 LABOR_EFFICIENCY = 0.65  # tile-planning: useful actions available per unit-turn
 HIRE_EFFICIENCY = 0.45   # hiring: measured rate once walking is paid for
@@ -641,6 +654,17 @@ def plan_roles(s, obs, money, day, last_day, board, target_hands,
         capacity[product] = market_capacity(product, minv[product], shops,
                                             day, last_day, turns_per_day)
 
+    # Price of having capital tied up, per dollar per day. A strawberry seed is
+    # $100 that returns nothing for ten days; a wheat seed is $10 back on day 2.
+    # Scored purely on $/tile/day the strawberry wins easily and the planner
+    # spends the whole opening bank on seed that cannot pay a wage or buy a cow
+    # until day 10 -- which is how the bank sat at ~$600 for the first third of
+    # the season. Charge for the wait, and charge more when cash is short.
+    capital_rate = CAPITAL_RATE
+    if cash_left < CAPITAL_TIGHT:
+        # Scarce cash is worth more than plentiful cash.
+        capital_rate *= 1.0 + CAPITAL_SQUEEZE * (1.0 - max(0.0, cash_left) / CAPITAL_TIGHT)
+
     def crop_score(crop):
         units, tdays = crop_plan(crop, day, last_day)
         if units <= 0:
@@ -651,7 +675,11 @@ def plan_roles(s, obs, money, day, last_day, board, target_hands,
             return -1.0
         rev = batch_revenue(crop, int(sale_inv[crop] + already), units)
         lab = CROP_LABOR.get(crop, 1.0)
-        return (rev - CROPS[crop]["seed"]) / tdays - LABOR_PRICE * lab
+        seed = CROPS[crop]["seed"]
+        # Interest on the seed money over the wait until the first harvest.
+        wait = max(0, CROPS[crop]["first"])
+        carry = capital_rate * seed * wait / tdays
+        return (rev - seed) / tdays - LABOR_PRICE * lab - carry
 
     def animal_score(animal):
         """$/tile/day of one more head, priced against the real curve.
@@ -982,7 +1010,23 @@ def _decide(obs, config):
     # Cash we refuse to invest: a few days of wages plus emergency wheat. Capped
     # as a share of the bank, so a bad patch cannot leave the floor above our
     # balance and freeze the farm out of buying anything at all.
-    invest_floor = min(700.0 + 3.0 * cumulative_hire_cost(target_hands) + 14.0 * n_animals,
+    #
+    # This used to reserve three days of `cumulative_hire_cost(target_hands)`,
+    # i.e. of the *most* hands the budget could ever afford. On day 0 that is 13
+    # hands, $609/day, so it locked away $2,527 of the $3,000 bank -- while the
+    # hire loop, which sizes the crew by the work actually available, hires five
+    # hands for $12. Reserving 200x the real wage bill is what left us with $473
+    # of usable cash on day 0: not enough for a sheep, barely one cow. Hence no
+    # herd until day 12, no land until day 10, and a bank flat at ~$600 through
+    # the entire opening while the leaders were at $19k by day 10.
+    #
+    # Size it off the crew the work implies instead, using the same expression
+    # the hire loop uses.
+    est_work = s.labor + 2.0 * min(len(s.empties), 3 * (1 + target_hands)) + len(s.weeds) + 8
+    est_hands = min(target_hands, max(0, int(math.ceil(
+        est_work / (turns_per_day * HIRE_EFFICIENCY))) - 1))
+    invest_floor = min(WAGE_RESERVE_DAYS * cumulative_hire_cost(est_hands)
+                       + WHEAT_RESERVE_PER_ANIMAL * n_animals + FLOOR_BASE,
                        INVEST_FLOOR_SHARE * money)
 
     roles, planned_head, labor_spare = plan_roles(
