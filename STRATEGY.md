@@ -447,7 +447,44 @@ Todas las cifras son **margen medio** (nuestro dinero − el del rival) contra
 | 09-27 | **v5: `invest_floor` realista** | **90** | **+4 744**, mediana +3 594, **62.2 %** ± 10.0 | ✅ **ACEPTADO** |
 | 09-27 | v5 confirmación, semillas nuevas | 202 | +3 542, mediana **+5 892**, **63.4 %** ± 6.6 | ✅ Confirmado (y subestimado, ver nota) |
 
-### 🎯 v5 — el bug de la reserva de caja (la mejor mejora hasta ahora)
+| 09-27 | **v6: coste de capital sobre semilla lenta** | **180** | **+18 969 / +18 635**, **91-93 %** | ✅ **ACEPTADO** (`CAPITAL_RATE=0.165`) |
+| 09-27 | `MOVE_COST` 13 → 22 / 35 / 55 | 90 c/u | +1 440 / +1 068 / +909 | ❌ No significativo |
+| 09-27 | `CAPITAL_RICH_DECAY` 0.5 / 1.0 / 1.8 | 90 c/u | +847 / +687 / −83 | ❌ No significativo |
+| 09-27 | `CARE_RATE` 0.62 / 0.80 / 0.95 | 90 c/u | −286 / **−3 057** / **−5 751** | ❌ Refutado (peor cuanto más alto) |
+| 09-27 | **Round-robin v6 vs todo lo anterior** | 50 | 100 % vs v3/v4/v5, 88 % global | ✅ Sin regresiones |
+
+### 🚀 v6 — cobrar intereses por la semilla lenta (la mejora más grande)
+
+`crop_score` valoraba las casillas en $/casilla/día **sin poner precio a la espera**. Una
+semilla de fresa son $100 que no devuelven nada durante diez días; una de trigo son $10 de
+vuelta el día 2. Puntuado así la fresa gana de calle, y el planificador se gastaba el banco
+entero de la apertura en semilla que no puede pagar un jornal ni comprar una vaca hasta el
+día 10.
+
+**El arreglo** cobra un interés sobre el dinero de semilla durante la espera hasta la
+primera cosecha, y lo encarece cuando hay poca caja:
+
+```
+carry = capital_rate × coste_semilla × días_hasta_primera_cosecha / días_ocupados
+```
+
+| `CAPITAL_RATE` | Margen | Win rate | Media |
+|---:|---:|---:|---:|
+| 0.10 | −5 673 | 38 % | 50 460 |
+| 0.13 | +7 848 | 64 % | 59 213 |
+| **0.15** | **+18 969** | **91 %** | **70 298** |
+| **0.18** | **+18 635** | **93 %** | 68 638 |
+| 0.22 | +8 112 | 66 % | 62 227 |
+| 0.30 | −1 878 | 41 % | 58 033 |
+| 0.60 | −18 615 | 12 % | 50 510 |
+
+Meseta plana en 0.15–0.18 sobre dos conjuntos de semillas disjuntos → tomamos **0.165**.
+
+**Efecto en la granja** (semilla 4242): el día 3 planta **trigo y zanahoria** en vez de
+fresa, y llega al día 10 con **$9.2k frente a $0**. Es exactamente la apertura de Canon
+(`MELON=12 WHEAT=7 COW=3 SHEEP=2` el día 3) que había sacado de los replays.
+
+### 🎯 v5 — el bug de la reserva de caja
 
 `invest_floor` reservaba **tres días del salario de `MAX_HANDS`**, o sea de las 13 manos
 que el presupuesto *podría* pagar como techo teórico:

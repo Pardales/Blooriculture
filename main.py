@@ -144,6 +144,10 @@ FLOOR_BASE = 700.0         # flat emergency cash held back
 CAPITAL_RATE = 0.165       # $/day charged per $ of seed money locked up
 CAPITAL_TIGHT = 1500.0     # investable cash below which capital gets pricier
 CAPITAL_SQUEEZE = 3.0      # how much dearer capital gets at zero cash
+# Fading the carry out once the bank is deep is the economically correct thing
+# to do -- $100 tied up for ten days costs nothing when you hold $20k -- but
+# measured over 0 / 0.5 / 1.0 / 1.8 at n=90 it is worth nothing either. Left off.
+CAPITAL_RICH_DECAY = 0.0   # how fast the carry fades once cash is plentiful
 WAGE_RESERVE_DAYS = 3.0    # days of the *realistic* wage bill kept in reserve
 WHEAT_RESERVE_PER_ANIMAL = 14.0  # feed money held back per head
 LABOR_PRICE = 11.0      # marginal $/action of the last hand we hire
@@ -664,6 +668,11 @@ def plan_roles(s, obs, money, day, last_day, board, target_hands,
     if cash_left < CAPITAL_TIGHT:
         # Scarce cash is worth more than plentiful cash.
         capital_rate *= 1.0 + CAPITAL_SQUEEZE * (1.0 - max(0.0, cash_left) / CAPITAL_TIGHT)
+    elif CAPITAL_RICH_DECAY > 0.0:
+        # ...and plentiful cash is worth less. Once the bank is deep, tying $100
+        # up in a strawberry seed for ten days costs nothing real, so the carry
+        # should fade out rather than keep taxing the best crop on the board.
+        capital_rate *= (CAPITAL_TIGHT / cash_left) ** CAPITAL_RICH_DECAY
 
     def crop_score(crop):
         units, tdays = crop_plan(crop, day, last_day)
