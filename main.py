@@ -26,20 +26,31 @@ bakeries show up and a sheep ranch when the yarn stores do.
 
 The parts that do not move:
 
-1.  Days 0-10 the starting quadrant goes to melons. $80 of seed becomes six
-    units worth ~$170 each while we are the only seller — roughly $20k of
-    capital on day 10, which no livestock ramp can match starting from $3,000.
+1.  Days 0-10 the starting quadrant goes mostly to melons and strawberries.
+    NOTE: this docstring used to claim the melon opening banks "roughly $20k of
+    capital on day 10". It does not. Measured over 90 episodes, the bank sits at
+    about $600 from day 0 to day 10 and $300 on day 16, because the seed bill is
+    paid on day 0 and nothing melon or strawberry yields lands before day 10.
+    The top of the leaderboard holds ~$19k on day 10 and compounds from there.
+    That gap is the agent's single biggest known weakness -- see STRATEGY.md §6.
 2.  Everything is costed in *actions*, not money. Hands are cheap (fib(n)) but
     a unit only gets 24 actions a day and walking burns them, so the planner
     spends a labour budget, keeps pens next to the shed and melons out on the
     rim, the auction charges every job for the distance walked to reach it, and
     we refuse to buy land we cannot staff.
-3.  Sell everything, every turn. Price depends only on cumulative volume, so
-    holding stock never earns more, and selling first beats the opponent to the
-    top of every curve.
+3.  Sell everything, every turn -- but not for the reason originally given here.
+    Price tracks *current* market inventory, not cumulative volume, and the town
+    drains that inventory for free all season, so on paper metering sales out
+    should pay far more. Measured, it does not: the shed caps at 100 items and
+    end-of-day overflow is discarded, so a unit held back is usually a unit
+    destroyed, and the opponent takes the top of the curve while we wait.
+    Throttling sales costs $10-35k a game (STRATEGY.md §3.1).
 
 Test locally:   python main.py
+Benchmark:      python tools/bench.py main.py variants/v3_nopace.py -n 45
 Submit:         kaggle competitions submit kaggriculture -f main.py -m "v3"
+
+Strategy notes, measured experiment log, and refuted ideas: STRATEGY.md
 """
 
 import math
@@ -68,6 +79,30 @@ ANIMALS = {
 
 PRODUCTS = ["WHEAT", "CARROT", "TOMATO", "STRAWBERRY", "MELON", "EGG", "MILK", "WOOL", "FERTILIZER"]
 
+SHOPS = {
+    "BAKERY":         ["EGG", "WHEAT"],
+    "PIZZA_SHOP":     ["MILK", "TOMATO", "WHEAT"],
+    "BRUNCH_SPOT":    ["EGG", "WHEAT", "STRAWBERRY"],
+    "YARN_STORE":     ["WOOL"],
+    "ICE_CREAM_SHOP": ["STRAWBERRY", "MILK", "WHEAT"],
+    "PET_CAFE":       ["CARROT"],
+    "SMOOTHIE_SHOP":  ["STRAWBERRY", "MILK"],
+    "FARMERS_MARKET": ["WHEAT", "CARROT", "TOMATO", "STRAWBERRY"],
+}
+MAX_SHOP_INSTANCES = 8
+SHOP_UNLOCK_INTERVAL = 3   # days; not exposed in the observation, so assume default
+SHOP_SELL_INTERVAL = 4     # turns between consumption ticks, likewise
+
+# Units of each product one not-yet-drawn shop is expected to pull per tick
+# (shops are drawn uniformly with replacement; single-product shops pull 2x).
+EXPECTED_SHOP_PULL = {}
+for _product in PRODUCTS:
+    _pull = 0.0
+    for _items in SHOPS.values():
+        if _product in _items:
+            _pull += 2.0 if len(_items) == 1 else 1.0
+    EXPECTED_SHOP_PULL[_product] = _pull / len(SHOPS)
+
 MARKET_PARAMS = {
     "WHEAT":      {"base": 25,  "I0": 10000, "T": 400, "bf": "sqrt",   "bt": 0.80, "af": "log",    "at": 0.20},
     "CARROT":     {"base": 35,  "I0": 10000, "T": 450, "bf": "hinge",  "bt": 1.00, "af": "sqrt",   "at": 0.70},
@@ -92,7 +127,10 @@ SHED_CAP = 100
 
 MOVE_COST = 13.0        # a walked tile is a lost action; price it like one
 MAX_HANDS = 13          # the fib hire cost eventually outruns what a hand reaches
-HIRE_BUDGET_SHARE = 0.16  # of current cash, per day
+# MEASURED (n=200, margin +$2,819 +/- 1,866 against the v3 baseline): the crew
+# was under-funded. 0.40 performs the same as 0.28, so HIRE_BUDGET_CAP binds
+# above this and there is nothing more to win by raising it further.
+HIRE_BUDGET_SHARE = 0.28  # of current cash, per day
 HIRE_BUDGET_CAP = 1700.0
 INVEST_FLOOR_SHARE = 0.90  # never reserve more than this fraction of the bank
 LABOR_PRICE = 11.0      # marginal $/action of the last hand we hire
@@ -100,14 +138,65 @@ LABOR_EFFICIENCY = 0.65  # tile-planning: useful actions available per unit-turn
 HIRE_EFFICIENCY = 0.45   # hiring: measured rate once walking is paid for
 ANIMAL_ACTIONS = 3.6    # feed + care + part of a harvest + fertilizer pickup
 CARE_RATE = 0.45        # share of days CARE actually wins a slot in the auction
+# CARE banks +1 unit, paid out on the next production: a cared cow makes 1.5
+# milk a day against 0.5, a cared sheep 1.33 wool against 0.33. Raising this bid
+# looked worth +$4k at n=28 -- but at n=80 the whole effect vanished into the
+# noise (see the log in STRATEGY.md), and pushing it high starves watering,
+# because a $2,500 CARE bid outbids a dying strawberry's $120. Left at 1.15.
+CARE_BID = 1.15         # CARE's auction bid, as a multiple of the product price
 ANIMAL_TILE_SHARE = 0.46
 WHEAT_PER_ANIMAL = 0.80  # wheat tiles that keep one animal fed every day
 WHEAT_FEED_VALUE = 0.45  # fraction of a product unit that one day of feed buys
 WHEAT_BUY_TIMES = 1      # feed top-ups per day (wheat in the shed crowds produce)
 WHEAT_SELL_RESERVE = 3.0  # days of feed kept back before wheat counts as surplus
 MIN_TILE_SCORE = 6.0    # $/tile/day below which a tile is not worth planting
+DRAIN_CREDIT = 1.0      # share of the town's remaining appetite a tile can count on
+
+# --- sell pacing -----------------------------------------------------------
+# The price tracks *current* inventory, and the town keeps eating that
+# inventory for free. So a unit held back is not a unit foregone: it is a unit
+# sold later into a market the shops have quietly restocked us for. Dumping a
+# premium good walks it straight into the $1 floor -- strawberry pays $3.8k if
+# you empty the shed into it and $46k if you meter it out. These four knobs are
+# the difference.
+# MEASURED, 32 episodes each: throttling sales is a large loss, not a gain.
+#   dump everything (SELL_PACED=False)  : $65.2k   <- best
+#   price floor only                    : $51.3k
+#   floor + daily quota                 : $29.8k
+# The shed caps at 100 items and end-of-day overflow is *discarded*, so a unit
+# held back is usually a unit destroyed -- and the opponent takes the top of the
+# curve while we wait. Melon is an overproduction problem, fixed at the plough,
+# not at the till. Keep the machinery (town_daily_drain sizes production below)
+# but leave the throttle off.
+SELL_PACED = False      # True re-enables the sell throttle (measured worse)
+SELL_QUOTA = True       # False = keep the price floor but never throttle volume
+SELL_PACE = 1.35        # multiple of the town's daily appetite we try to claim
+SELL_PRICE_KEEP = 0.55  # never walk a unit below this fraction of its base price
+SELL_WINDOWS = 6        # selling opportunities per day (town eats every 4 turns)
+MIN_TRICKLE = 3.0       # daily allowance for goods no shop eats (melon, fertilizer)
+LIQUIDATE_DAYS = 1      # days left at which unsold stock is worth more gone than held
+
+# --- production sizing -----------------------------------------------------
+# Melon looks unbeatable on an untouched curve, which is how the planner ended
+# up filling the opening quadrant with 23 of them: 138 units into a market that
+# absorbs 158 in total *across both players*, sold at $81 against Canon's $224
+# on 12 tiles. Cap what we commit to each product instead.
+# MEASURED: capping our own output to "our share" loses $3.7k a game and, worse,
+# lifts the opponent's mean from $61.7k to $69.9k -- the curve we politely leave
+# alone is the curve they sell into. In a two-player market, racing to produce
+# and sell first beats leaving room. Set MARKET_SHARE back under ~1.0 to re-arm.
+MARKET_SHARE = 10.0      # share of a product's curve we plan to claim
+SHARE_PRICE_KEEP = 0.60  # stop producing once the marginal unit fetches under this x base
+
+# --- opening -----------------------------------------------------------
+HERD_PRIORITY_DAYS = -1  # days during which livestock may dip into the wage reserve
+HERD_FLOOR_SHARE = 0.25  # fraction of invest_floor the herd must still leave behind
+HERD_COMMIT_FULL = True  # credit the herd we own with the whole rest of the season
+RIVAL_CREDIT = 1.0      # how much of the opponent's visible pipeline to expect
 LAST_LAND_DAY = 22
 LAND_LABOR_SLACK = 12.0  # spare unit-actions/day required before buying a quadrant
+LAND_EMPTY_MAX = 4       # free tiles we tolerate before expanding is allowed
+LAND_CASH_MARGIN = 800.0  # cash kept on top of cost + invest_floor to expand
 
 
 # --------------------------------------------------------------------------
@@ -143,6 +232,195 @@ def price_at(item, inventory):
         amp = p["at"] * base / _shape(p["af"], T, T)
         val = base - amp * _shape(p["af"], inventory - I0, T)
     return max(PRICE_FLOOR, int(round(val)))
+
+
+def town_future_drain(product, shops, day, last_day, turns_per_day):
+    """Units of `product` the town will eat between now and the final day.
+
+    This is the term that makes premium goods worth farming: nothing restocks
+    the shelves, so every unit the shops eat is one more unit we can sell near
+    the top of the curve. It also grows over time, because shops keep unlocking
+    and never close."""
+    if product == "FERTILIZER":
+        return 0.0
+    ticks_per_day = float(turns_per_day) / SHOP_SELL_INTERVAL
+    pull = 0.0
+    for name in shops:
+        items = SHOPS.get(name)
+        if items and product in items:
+            pull += 2.0 if len(items) == 1 else 1.0
+    expected_new = EXPECTED_SHOP_PULL.get(product, 0.0)
+    slots_left = max(0, MAX_SHOP_INSTANCES - len(shops))
+    opened = 0
+    total = 0.0
+    for d in range(day + 1, last_day + 1):
+        if d % SHOP_UNLOCK_INTERVAL == 0 and opened < slots_left:
+            pull += expected_new
+            opened += 1
+        total += pull * ticks_per_day + 1.0   # +1/day for the town centre
+    return total
+
+
+def rival_future_supply(obs, player, day, last_day):
+    """Units each product the *opponent's* farm is already committed to ship.
+
+    Their tiles are public, so there is no excuse for walking into a market
+    they have twenty sheep pointed at. Without this the agent reads a market as
+    scarce on day 10 simply because the rival has not harvested yet, piles in,
+    and meets them at the bottom of a `sq` glut curve."""
+    out = {}
+    for pid, farm in enumerate(obs["farms"]):
+        if pid == player:
+            continue
+        for row in farm["tiles"]:
+            for t in row:
+                if not isinstance(t, dict):
+                    continue
+                animal = t.get("animal")
+                if animal and animal in ANIMALS:
+                    a = ANIMALS[animal]
+                    start = max(day, t.get("placed_day", day) + a["first"])
+                    units = animal_rate(animal) * max(0, last_day - start)
+                    units += t.get("yield_units", 0)
+                    out[a["product"]] = out.get(a["product"], 0.0) + units
+                elif t.get("kind") == "PLANT" and t.get("crop") in CROPS:
+                    crop = t["crop"]
+                    out[crop] = out.get(crop, 0.0) + crop_expected_yield(
+                        crop, t.get("yield_units", 0), day - t.get("planted_day", day),
+                        t.get("watered_today", False),
+                        t.get("fertilized_until_day", -1) >= day)
+    return out
+
+
+def town_daily_drain(product, shops, turns_per_day):
+    """Units of `product` the town eats per day, from the shops actually unlocked.
+
+    Exact, not estimated: `unlocked_shops` is in the observation. This is the
+    rate at which the market restocks our selling capacity for free, and so the
+    rate we can sell at forever without moving the price against us.
+    """
+    ticks = max(1, turns_per_day // SHOP_SELL_INTERVAL)
+    per_tick = 0
+    for name in shops:
+        items = SHOPS.get(name)
+        if items and product in items:
+            per_tick += 2 if len(items) == 1 else 1
+    drain = per_tick * ticks
+    if product != "FERTILIZER":
+        drain += 1  # town centre, one of everything once a day
+    return drain
+
+
+def daily_sell_quota(item, inv, shops, days_left, turns_per_day):
+    """Units of `item` we are willing to sell today.
+
+    Two sources of room: the town's ongoing appetite (a flow), and whatever
+    scarcity it has already built up below I0 (a stock, which we release over
+    the days we have left rather than all at once).
+    """
+    if not SELL_QUOTA:
+        return 1e9  # price floor alone decides
+    drain = town_daily_drain(item, shops, turns_per_day)
+    quota = SELL_PACE * drain
+    if drain <= 1:
+        # Nobody eats melon or fertilizer; that market never recovers, so the
+        # standing absorption is all we will ever get. Meter it out.
+        quota = max(quota, MIN_TRICKLE)
+    I0 = MARKET_PARAMS[item]["I0"]
+    if inv < I0:
+        quota += (I0 - inv) / max(1.0, float(days_left))
+    return max(1.0, quota)
+
+
+def _inv_shape(func, v):
+    """Inverse of _shape. Only the glut-side shapes occur here (no hinge)."""
+    v = max(0.0, v)
+    if func == "linear":
+        return v
+    if func == "sq":
+        return math.sqrt(v)
+    if func == "sqrt":
+        return v * v
+    if func == "log":
+        return math.exp(min(30.0, v)) - 1.0
+    return v
+
+
+def units_until_price(item, inv, floor_price):
+    """Units we can add to the market before the price falls below floor_price.
+
+    Closed form -- walking the curve one unit at a time is far too slow to run
+    every turn for every product.
+    """
+    p = MARKET_PARAMS[item]
+    base, I0, T = p["base"], p["I0"], p["T"]
+    if floor_price >= base:
+        # Only the scarcity buffer qualifies: how far we can refill towards I0
+        # while still clearing the asking price.
+        amp = p["bt"] * base / _shape(p["bf"], T, T)
+        if amp <= 0:
+            return 0.0
+        need = _shape_inverse_below(p["bf"], (floor_price - base) / amp, T)
+        return max(0.0, (I0 - inv) - need)
+    amp = p["at"] * base / _shape(p["af"], T, T)
+    if amp <= 0:
+        return 0.0
+    glut = _inv_shape(p["af"], (base - floor_price) / amp)
+    return max(0.0, (I0 - inv)) + glut
+
+
+def _shape_inverse_below(func, v, T):
+    """Inverse of _shape on the scarcity side, including hinge (numeric)."""
+    v = max(0.0, v)
+    if func == "hinge":
+        # u + 8*max(0,u-1)^2 = v  -> solve for u, then x = u*T
+        if v <= 1.0:
+            u = v
+        else:
+            # 8u^2 - 15u + (8 - v) = 0
+            disc = 225.0 - 32.0 * (8.0 - v)
+            u = (15.0 + math.sqrt(max(0.0, disc))) / 16.0
+        return u * T
+    return _inv_shape(func, v)
+
+
+def market_capacity(product, inv, shops, day, last_day, turns_per_day):
+    """Units of `product` still worth producing, as our share of the curve.
+
+    Standing room down to a price we would still accept, plus everything the
+    town will eat between now and the end -- then split, because the opponent
+    is selling into the very same curve. This is the number that stops the
+    planner turning the whole opening quadrant into melons it cannot sell.
+    """
+    floor_price = SHARE_PRICE_KEEP * MARKET_PARAMS[product]["base"]
+    room = units_until_price(product, inv, floor_price)
+    drain = town_future_drain(product, shops, day, last_day, turns_per_day)
+    return MARKET_SHARE * (room + DRAIN_CREDIT * drain)
+
+
+def units_above_price(item, inv, floor_price, cap):
+    """How many units we can add to the market before the price drops below floor."""
+    n = 0
+    while n < cap:
+        if price_at(item, inv + n) < floor_price:
+            break
+        n += 1
+    return n
+
+
+def sell_allowance(item, inv, shops, day, days_left, turns_per_day, held):
+    """Units of `item` to offer this turn, or 0."""
+    if held <= 0:
+        return 0
+    # Last day: unsold stock scores nothing, so any price beats holding.
+    if days_left <= 0:
+        return held
+    per_day = daily_sell_quota(item, inv, shops, days_left, turns_per_day)
+    if days_left <= LIQUIDATE_DAYS:
+        per_day = max(per_day, held)  # clear the shed while there is still a market
+    allow = min(held, int(math.ceil(per_day / float(max(1, SELL_WINDOWS)))))
+    floor_price = max(PRICE_FLOOR, SELL_PRICE_KEEP * MARKET_PARAMS[item]["base"])
+    return max(0, units_above_price(item, inv, floor_price, allow))
 
 
 def batch_revenue(item, inventory, n):
@@ -344,12 +622,34 @@ def plan_roles(s, obs, money, day, last_day, board, target_hands,
     counts = {"WHEAT": 0}
     cash_crops = ["MELON", "TOMATO", "CARROT", "STRAWBERRY", "WHEAT"]
 
+    # Where each product's inventory will sit by the time this tile's output
+    # reaches the market: today's level, less the town's appetite between now
+    # and then (roughly half the remaining season, on average).
+    shops = obs["town"].get("unlocked_shops", []) or []
+    rival = rival_future_supply(obs, obs["player"], day, last_day)
+    sale_inv = {}
+    for product in PRODUCTS:
+        drain = town_future_drain(product, shops, day, last_day, turns_per_day)
+        sale_inv[product] = (minv[product] - DRAIN_CREDIT * drain
+                             + RIVAL_CREDIT * rival.get(product, 0.0))
+
+    # How many units of each product this farm should ever put on the market.
+    # Computed once a turn: the inverse-curve form is O(1), but calling it per
+    # tile per crop inside the planning loop would still be wasteful.
+    capacity = {}
+    for product in PRODUCTS:
+        capacity[product] = market_capacity(product, minv[product], shops,
+                                            day, last_day, turns_per_day)
+
     def crop_score(crop):
         units, tdays = crop_plan(crop, day, last_day)
         if units <= 0:
             return -1.0
         already = s.growing.get(crop, 0) + planned.get(crop, 0) * units
-        rev = batch_revenue(crop, minv[crop] + already, units)
+        # Wheat is feed, not a cash crop; its curve is near-bottomless anyway.
+        if crop != "WHEAT" and already + units > capacity.get(crop, 1e9):
+            return -1.0
+        rev = batch_revenue(crop, int(sale_inv[crop] + already), units)
         lab = CROP_LABOR.get(crop, 1.0)
         return (rev - CROPS[crop]["seed"]) / tdays - LABOR_PRICE * lab
 
@@ -369,10 +669,17 @@ def plan_roles(s, obs, money, day, last_day, board, target_hands,
         if units <= 0:
             return -1.0
         product = a["product"]
-        # Output already committed: the herd we own plus heads planned this turn.
-        committed = int(round((s.herd.get(animal, 0) + planned_head.get(animal, 0))
-                              * rate * max(0, prod_days)))
-        rev = batch_revenue(product, minv[product] + committed, units)
+        # Output already committed to this product's curve before the new head
+        # sells a thing. Animals we already own are past their first yield, so
+        # they keep producing for the whole rest of the season -- crediting them
+        # only with a newcomer's shorter window understates supply and talks the
+        # planner into piling every tile onto one species.
+        herd_days = max(0, days_left) if HERD_COMMIT_FULL else max(0, prod_days)
+        committed = int(round(s.herd.get(animal, 0) * rate * herd_days
+                              + planned_head.get(animal, 0) * rate * max(0, prod_days)))
+        if committed + units > capacity.get(product, 1e9):
+            return -1.0
+        rev = batch_revenue(product, int(sale_inv[product] + committed), units)
         rev += fert_marginal * max(0, days_left - 1)
         return (rev - a["cost"]) / animal_tile_days - LABOR_PRICE * animal_labor
 
@@ -483,8 +790,14 @@ def build_jobs(s, roles, priv, day, last_day, prices, fert_for_wheat, held_anima
             add({"x": x, "y": y, "op": ["FEED"], "v": v, "need": "WHEAT"})
         # CARE banks a bonus paid out at the *next* end-of-day, so caring on the
         # penultimate day buys a production tick the season never reaches.
-        if not t.get("cared_today") and day < last_day - 1:
-            add({"x": x, "y": y, "op": ["CARE"], "v": 1.15 * pprice, "need": None})
+        # CARE banks a bonus paid out at the *next* end-of-day, so caring on the
+        # penultimate day buys a production tick the season never reaches. The
+        # bonus is worth a whole extra unit of product -- a cared cow makes 1.5
+        # milk a day against 0.5 -- but it is capped by max_held, so a full
+        # animal has nowhere to put it.
+        if not t.get("cared_today") and day < last_day - 1 \
+                and held < a["max_held"]:
+            add({"x": x, "y": y, "op": ["CARE"], "v": CARE_BID * pprice, "need": None})
 
     for (x, y, t) in s.plants:
         crop = t["crop"]
@@ -502,6 +815,13 @@ def build_jobs(s, roles, priv, day, last_day, prices, fert_for_wheat, held_anima
                 add({"x": x, "y": y, "op": ["HARVEST"], "v": held * price, "need": None})
             if not watered and not endgame:
                 if t.get("consecutive_unwatered", 0) >= 1:
+                    # MEASURED (n=90): bidding this plant's whole remaining life
+                    # here -- 4 productions, ~$960 for a young strawberry --
+                    # costs $5k a game. The auction is zero-sum over units, so
+                    # overpaying to save a strawberry starves the harvests and
+                    # animal jobs that were the better use of the same turn.
+                    # Dropping the bid to a flat floor instead costs $40k, so
+                    # this term is load-bearing; it is just already tuned.
                     add({"x": x, "y": y, "op": ["WATER"],
                          "v": max(60.0, (held + 1) * price), "need": None})
                 elif fertilized:
@@ -555,7 +875,13 @@ def build_jobs(s, roles, priv, day, last_day, prices, fert_for_wheat, held_anima
 
 
 # --------------------------------------------------------------------------
-# Greedy auction: value minus the cost of the actions spent walking there
+# Greedy auction over *sites*, not jobs.
+#
+# Bidding job-by-job sends a unit across the farm for one action and then sends
+# it somewhere else. Bidding per tile fixes that: a fed-and-cared animal is four
+# actions on one square (feed, care, harvest, collect fertilizer), so the walk
+# amortises. A site is scored by its best job plus a discounted tail of the rest
+# — discounted because the unit only does one per turn and may be called away.
 # --------------------------------------------------------------------------
 
 def assign(units, jobs):
@@ -799,7 +1125,8 @@ def _decide(obs, config):
 
     market = build_market(s, me, money, day, hour, last_day, days_left, turns_per_day,
                           roles, n_animals, stock_held, planned_head, prices, minv,
-                          shed, seeds, target_hands, invest_floor, endgame, labor_spare)
+                          shed, seeds, target_hands, invest_floor, endgame, labor_spare,
+                          obs["town"].get("unlocked_shops", []) or [])
 
     return {"farmer": unit_actions.get(0, ["PASS"]),
             "hands": [unit_actions.get(i, ["PASS"]) for i in range(1, len(positions))],
@@ -812,7 +1139,7 @@ def _decide(obs, config):
 
 def build_market(s, me, money, day, hour, last_day, days_left, turns_per_day,
                  roles, n_animals, stock_held, planned_head, prices, minv, shed, seeds,
-                 target_hands, invest_floor, endgame, labor_spare):
+                 target_hands, invest_floor, endgame, labor_spare, shops):
     orders = []
     cash = money
     max_orders = 10
@@ -839,28 +1166,45 @@ def build_market(s, me, money, day, hour, last_day, days_left, turns_per_day,
             cash -= c
             hires_today += 1
 
-    # ---- sell: the curve only cares about volume, so first seller wins.
+    # ---- sell, but meter it.
+    #
+    # The old rule here was "sell everything, every turn", on the theory that
+    # price depends only on cumulative volume. It does not: it depends on the
+    # *current* inventory, and the town drains that inventory for free all
+    # season. Emptying the shed into a premium curve is how strawberry turns
+    # $46k of output into $3.8k. So each product gets a daily quota sized to
+    # what the town will actually eat, spread over SELL_WINDOWS turns, and no
+    # unit is ever sold below SELL_PRICE_KEEP of its base price.
+    #
     # The wheat band is deliberately wide: buying and selling wheat in the same
     # day is pure leakage, so we only shed a genuine surplus.
-    wheat_reserve = 0
-    if n_animals > 0 and not endgame:
-        wheat_reserve = int(WHEAT_SELL_RESERVE * n_animals) + 12
-    sells = []
-    for item in PRODUCTS:
-        q = shed.get(item, 0)
-        if item == "WHEAT":
-            q -= wheat_reserve
-        elif item == "FERTILIZER" and not endgame and s.wheat_tiles > 0 \
-                and prices["FERTILIZER"] < 2.0 * prices["WHEAT"]:
-            q -= min(6, s.wheat_tiles)
-        if q > 0:
-            sells.append((q * prices.get(item, 1), item, q))
-    sells.sort(reverse=True)
-    for _, item, q in sells:
-        if len(orders) >= max_orders:
-            break
-        orders.append(["SELL", item, q])
-        cash += 0.8 * q * prices.get(item, 1)
+    window = max(1, turns_per_day // max(1, SELL_WINDOWS))
+    selling_now = (not SELL_PACED) or endgame or window == 1 or (hour % window == 1)
+    if selling_now:
+        wheat_reserve = 0
+        if n_animals > 0 and not endgame:
+            wheat_reserve = int(WHEAT_SELL_RESERVE * n_animals) + 12
+        sells = []
+        for item in PRODUCTS:
+            q = shed.get(item, 0)
+            if item == "WHEAT":
+                q -= wheat_reserve
+            elif item == "FERTILIZER" and not endgame and s.wheat_tiles > 0 \
+                    and prices["FERTILIZER"] < 2.0 * prices["WHEAT"]:
+                q -= min(6, s.wheat_tiles)
+            if q <= 0:
+                continue
+            if SELL_PACED:
+                q = sell_allowance(item, minv.get(item, MARKET_PARAMS[item]["I0"]),
+                                   shops, day, days_left, turns_per_day, q)
+            if q > 0:
+                sells.append((q * prices.get(item, 1), item, q))
+        sells.sort(reverse=True)
+        for _, item, q in sells:
+            if len(orders) >= max_orders:
+                break
+            orders.append(["SELL", item, q])
+            cash += 0.8 * q * prices.get(item, 1)
 
     if endgame:
         return orders[:max_orders]
@@ -886,6 +1230,13 @@ def build_market(s, me, money, day, hour, last_day, days_left, turns_per_day,
             cash -= buy * cost
 
     # ---- livestock, but only just ahead of the structures that can house it.
+    #
+    # MEASURED: buying the herd *before* seed, so it could not be crowded out of
+    # the opening, cost $29k a game (40.6k vs 69.9k over 32 episodes). Animals
+    # bought ahead of their pens just sit in the shed, they starve without wheat
+    # to feed them, and the cash they consume is cash the crops needed to get
+    # going at all. Seed first is correct.
+    #
     # An animal still in the shed at the buzzer is its full price thrown away,
     # so we stay close to the pens that actually exist.
     open_kinds = {}
@@ -903,7 +1254,10 @@ def build_market(s, me, money, day, hour, last_day, days_left, turns_per_day,
         if want <= 0:
             continue
         room = SHED_CAP - sum(shed.values())
-        afford = int(max(0.0, cash - invest_floor) // a["cost"])
+        # Early on the herd outranks the seed bill, so it is allowed to dig into
+        # the wage reserve; later the reserve protects the payroll as intended.
+        floor = invest_floor * (HERD_FLOOR_SHARE if day <= HERD_PRIORITY_DAYS else 1.0)
+        afford = int(max(0.0, cash - floor) // a["cost"])
         buy = max(0, min(want, afford, room))
         if buy > 0:
             orders.append(["BUY_ANIMAL", animal, buy])
@@ -916,7 +1270,8 @@ def build_market(s, me, money, day, hour, last_day, days_left, turns_per_day,
         bought = len(me.get("unlocked_quadrants", ["NW"])) - 1
         if bought < len(LAND_PRICES):
             cost = LAND_PRICES[bought]
-            if (cash >= cost + invest_floor + 800 and len(s.empties) <= 4
+            if (cash >= cost + invest_floor + LAND_CASH_MARGIN
+                    and len(s.empties) <= LAND_EMPTY_MAX
                     and labor_spare >= LAND_LABOR_SLACK):
                 orders.append(["BUY_LAND"])
                 cash -= cost
