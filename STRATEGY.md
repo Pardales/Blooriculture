@@ -2,7 +2,7 @@
 
 > Documento vivo. Recoge **todas** las estrategias: las que funcionan (con evidencia
 > medida), las que creemos que funcionan (hipótesis sin validar) y las que **no**
-> funcionan (con la evidencia de por qué). Última actualización: 2026-09-27.
+> funcionan (con la evidencia de por qué). Última actualización: 2026-09-30.
 
 ---
 
@@ -11,21 +11,37 @@
 | Dato | Valor |
 |---|---|
 | Equipo | `Blooriculture` |
-| Submission activa | `56496770` (subida 2026-09-23) |
-| Récord en vivo | **24W – 31L – 0T** (43.6 % en 55 episodios) |
-| Dinero medio nuestro | **$60 830** (min 21 480 · max 110 008) |
-| Dinero medio rival | **$79 304** |
-| Mejores rivales | 165 000 – **198 970** |
-| Posición | **por debajo del puesto 200** (la API corta ahí) |
-| Rating puesto 1 / 10 / 100 / 200 | 3053.6 / 2897.6 / 2621.9 / 2505.9 |
+| Submission activa | `56616346` = **v6** (subida 2026-09-27 18:29) |
+| Récord en vivo (v6) | **21W – 26L – 0T** (44.7 % en 47 episodios) |
+| Dinero medio nuestro | **$65 387** (min 20 209 · max 106 920) |
+| Dinero medio rival | **$78 000** (max 200 786) |
+| Posición | **7 081 de 10 204 equipos** (`userRank` de la API) |
+| Rating puesto 1 / 10 | 3111.4 / 2821.8 |
 | Baseline local v3 (n=120) | $54 890 de media |
-| **Local v4 (actual)** | **$59 056** de media, win rate 48.3 % |
-| Deadline | **2026-09-30 23:59** |
+| **Local v6 (actual)** | +$18 969 de margen y **91-93 %** vs v5 (n=180) |
+| Deadline | **2026-09-30 23:59** ← hoy |
 | Premio | $50 000 — **los 10 primeros ganan $5 000 cada uno** |
 
-> Realismo sobre el objetivo: entrar en el top 10 exige un rating ~2898, y estamos por
-> debajo del puesto 200 (rating < 2506). La mejora verificada de la v4 (+$2.8k de margen,
-> ~+8 pp de win rate) es real pero pequeña; no cambia la liga en la que jugamos. Lo que
+Las tres submissions siguen jugando episodios en paralelo, así que el récord en vivo
+se puede comparar entre versiones — y ahí está el aviso importante:
+
+| Submission | Versión | Episodios | Win rate | Dinero medio |
+|---|---|---:|---:|---:|
+| `56616346` | v6 | 47 | 44.7 % | **$65 387** |
+| `56611724` | v4 | 39 | **46.2 %** | $59 107 |
+| `56496770` | v3 | 56 | 42.9 % | $60 592 |
+
+**Las ganancias locales de la v6 no se han reproducido en el ranking.** Local, la v6 gana
+el 91-93 % de las partidas contra la v5; en vivo hace 44.7 %, indistinguible de la v3 y
+de la v4 con estas muestras (±14 pp a n=47). Sube el **dinero** (+$4.8k sobre la v4, que
+es lo que el arnés medía) pero no las **victorias**, que es lo único que mueve el rating
+— exactamente el riesgo que ya estaba anotado en §7 ("el ranking premia VICTORIAS").
+La causa más probable: el self-play local mide contra versiones nuestras, y el margen de
+la v6 viene de la cola alta de partidas que ya íbamos a ganar.
+
+> Realismo sobre el objetivo: entrar en el top 10 exige un rating ~2822, y estamos en el
+> puesto 7 081 de 10 204. Las mejoras verificadas de la v4 a la v6 son reales en dinero
+> pero no han movido el win rate en vivo; no cambian la liga en la que jugamos. Lo que
 > falta es estructural (§6), no de ajuste.
 
 **El hueco es de 3×.** Los mejores agentes terminan en 175–199 k; nosotros en 55–65 k.
